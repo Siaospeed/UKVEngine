@@ -29,7 +29,6 @@ public:
     bool Get(const std::string& key, std::string* out_value);
     void Put(std::string key, std::string value);
     bool Delete(const std::string& key);
-    [[deprecated]] void DebugDisplay() const;
 
 private:
     size_t capacity_;

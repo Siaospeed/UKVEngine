@@ -8,6 +8,7 @@
 
 #include "resp_builder.h"
 #include "ukv_main.h"
+#include "utils.h"
 
 UkvClient::~UkvClient() {
     if (client_fd_ != -1) {
@@ -27,11 +28,15 @@ int UkvClient::ParseArgs(int argc, char* argv[]) {
                     port_ = std::stoi(optarg);
                     break;
                 } catch (std::invalid_argument&) {
-                    std::cerr << "[FATAL] Bad port \'" << optarg << "\'.\n";
+                    std::string msg;
+                    msg.append("Bad port \'").append(optarg).append("\'.");
+                    LOG_ERROR(msg);
                     return 1;
                 }
             default:
-                std::cerr << "Usage: " << argv[0] << " [-h host] [-p port]\n";
+                std::string msg;
+                msg.append("Usage: ").append(argv[0]).append(" [-h host] [-p port]");
+                LOG_ERROR(msg);
                 return 1;
         }
     }
@@ -84,7 +89,9 @@ bool UkvClient::InitNetwork() {
 
     int s = getaddrinfo(host_.c_str(), port_str.c_str(), &hints, &result);
     if (s != 0) {
-        std::cerr << "[FATAL] DNS resolution failed: " << gai_strerror(s) << "\n";
+        std::string msg;
+        msg.append("DNS resolution failed: ").append(gai_strerror(s));
+        LOG_ERROR(msg);
         return false;
     }
 
@@ -105,13 +112,11 @@ bool UkvClient::InitNetwork() {
     freeaddrinfo(result);
 
     if (rp == nullptr) {
-        std::cerr << "[FATAL] Connection failed! Is ukvd running on "
-                << get_endpoint() << "?\n";
+        LOG_ERROR("Connection failed! Is ukvd running on " + get_endpoint() + "?");
         return false;
     }
 
-    std::cout << "UKVEngine Client successfully connected to "
-            << get_endpoint() << "...\n";
+    LOG_INFO("UKVEngine Client successfully connected to " + get_endpoint() + "...");
     return true;
 }
 
@@ -141,6 +146,9 @@ void UkvClient::Run() {
 
         char buffer[4096];
         ssize_t bytes_recv = recv(client_fd_, buffer, sizeof(buffer) - 1, 0);
+        if (bytes_recv <= 0) {
+            return;
+        }
         buffer[bytes_recv] = '\0';
 
         std::string output(buffer);

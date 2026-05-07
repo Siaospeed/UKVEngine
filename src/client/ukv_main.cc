@@ -8,6 +8,7 @@
 #include <string>
 
 #include "ukv_client.h"
+#include "utils.h"
 
 std::atomic<bool> g_running(true);
 
@@ -20,8 +21,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "UKVEngine Client connecting to "
-              << client.get_endpoint() << "...\n";
+    LOG_INFO("UKVEngine Client connecting to " + client.get_endpoint() + "...");
     client.Run();
 
     return 0;

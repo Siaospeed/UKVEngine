@@ -3,15 +3,18 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <iostream>
 #include <thread>
 
 #include "resp_builder.h"
 #include "thread_pool.h"
+#include "utils.h"
 
 UkvServer::UkvServer(ShardedLruCache* cache)
         : cache_(cache) {
@@ -60,12 +63,16 @@ int UkvServer::ParseArgs(int argc, char* argv[]) {
                     port_ = std::stoi(optarg);
                     break;
                 } catch (std::invalid_argument&) {
-                    std::cerr << "[FATAL] Bad port \'" << optarg << "\'.\n";
+                    std::string msg;
+                    msg.append("Bad port \'").append(optarg).append("\'.");
+                    LOG_ERROR(msg);
                     return 1;
                 }
 
             default:
-                std::cerr << "Usage: " << argv[0] << " [-p port]\n";
+                std::string msg;
+                msg.append("Usage: ").append(argv[0]).append(" [-p port]");
+                LOG_ERROR(msg);
                 return 1;
         }
     }
@@ -104,15 +111,13 @@ void UkvServer::Run() {
 bool UkvServer::InitNetwork() {
     listen_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
     if (listen_fd_ == -1) {
-        std::cerr << "[FATAL] Cannot create socket!\n";
-        return false;
+        LOG_FATAL("Cannot create socket!");
     }
 
     // Disable 'IPv6-only' to support dual-stack socket.
     int opt = 0;
     if (setsockopt(listen_fd_, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) == -1) {
-        std::cerr << "[FATAL] ";
-        return false;
+        LOG_ERROR("Failed to enablr dual-stack socket");
     }
 
     // Enable port reuse to avoid 'address already in use' errors during server restarts.
@@ -124,14 +129,14 @@ bool UkvServer::InitNetwork() {
     server_addr_.sin6_port = htons(port_);
 
     if (bind(listen_fd_, reinterpret_cast<sockaddr*>(&server_addr_), sizeof(server_addr_)) == -1) {
-        std::cerr << "[FATAL] Failed to bind port " << port_
-                  << ". Is it already in use?\n";
+        std::string port_str;
+        utils::FastIntToString(port_, port_str);
+        LOG_ERROR("Failed to bind port " + port_str + ". Is it already in use?");
         return false;
     }
 
     if (listen(listen_fd_, 16384) == -1) {
-        std::cerr << "[FATAL] Cannot prepare to accept connections!\n";
-        return false;
+        LOG_FATAL("Cannot prepare to accept connections!");
     }
 
     epoll_fd_ = epoll_create1(0);
@@ -148,6 +153,15 @@ void UkvServer::HandleNewConnection() {
     sockaddr_in6 client_addr{};
     socklen_t client_addr_len = sizeof(client_addr);
     int client_fd = accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len);
+    if (client_fd == -1) {
+        return;
+    }
+
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+
+    int flag = 1;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
     {
         std::lock_guard<std::shared_mutex> lock(map_mutex_);
@@ -187,15 +201,18 @@ void UkvServer::HandleClientData(int active_fd) {
                     }
 
                     std::string& action = command[0];
+                    std::transform(action.begin(), action.end(), action.begin(), ::toupper);
+
                     auto iter = command_handlers_.find(action);
                     if (iter != command_handlers_.end()) {
                         iter->second(std::move(command), out_buffer);
-                        write(active_fd, out_buffer.data(), out_buffer.size());
                     }
                     else {
                         RespBuilder::Error("unknown action", out_buffer);
-                        write(active_fd, out_buffer.data(), out_buffer.size());
                     }
+                }
+                if (!out_buffer.empty()) {
+                    write(active_fd, out_buffer.data(), out_buffer.size());
                 }
             }
 

@@ -15,7 +15,8 @@ public:
     bool Delete(const std::string& key);
 
 private:
-    std::vector<std::unique_ptr<LruCache> > shards_;
+    std::vector<std::unique_ptr<LruCache>> shards_;
+    size_t num_shards_;
 };
 
 #endif // !UKVENGINE_SHARDED_LRU_CACHE_H_

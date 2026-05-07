@@ -6,6 +6,7 @@
 
 #include "sharded_lru_cache.h"
 #include "ukv_server.h"
+#include "utils.h"
 
 std::atomic<bool> g_running(true);
 
@@ -20,7 +21,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "UKVEngine Daemon starting at port " << server.get_port() << "...\n";
+    std::string port_str;
+    utils::FastIntToString(server.get_port(), port_str);
+    LOG_INFO("UKVEngine Daemon starting at port " + port_str + "...");
     server.Run();
 
     return 0;

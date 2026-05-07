@@ -66,21 +66,3 @@ bool LruCache::Delete(const std::string& key) {
 
     return true;
 }
-
-[[deprecated]] void LruCache::DebugDisplay() const {
-    if (size_ == 0) {
-        std::cout << "    Cache: (Empty)" << std::endl;
-        return;
-    }
-
-    Node* curr = head_->next;
-    std::cout << "    Cache: [HOT] ";
-    while (curr != tail_) {
-        std::cout << "(" << curr->key << ":" << curr->value << ")";
-        if (curr->next != tail_) {
-            std::cout << " <-> ";
-        }
-        curr = curr->next;
-    }
-    std::cout << " [COLD]" << std::endl;
-}
