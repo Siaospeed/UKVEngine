@@ -4,13 +4,14 @@
 #include <netinet/in.h>
 #include <sys/epoll.h>
 
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
-#include "lru_cache.h"
 #include "sharded_lru_cache.h"
 #include "resp_parser.h"
 #include "thread_pool.h"
@@ -50,7 +51,12 @@ private:
     std::unique_ptr<ThreadPool> pool_;
     std::unordered_map<int, RespParser> client_parsers_;
 
+    inline static const std::filesystem::path kAofBasePath = "/var/lib/ukvd";
+    inline static const std::filesystem::path kAofFilePath = kAofBasePath / "ukv.aof";
+    std::ofstream aof_file_;
+
     std::shared_mutex map_mutex_;
+    std::mutex aof_mutex_;
 
     enum class ServerState {
         OK,
@@ -60,6 +66,9 @@ private:
     bool InitNetwork();
     void HandleNewConnection();
     void HandleClientData(int active_fd);
+
+    void AppendAof(const std::vector<std::string>& args);
+    void ReplayAof();
 };
 
 #endif // !UKVENGINE_UKV_SERVER_H_

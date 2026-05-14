@@ -10,7 +10,7 @@
 
 class ThreadPool {
 public:
-    ThreadPool(size_t thread_num) : running_(true) {
+    explicit ThreadPool(size_t thread_num) : running_(true) {
         for (size_t i = 0; i < thread_num; i++) {
             workers_.emplace_back([this] {
                 for (;;) {
@@ -34,6 +34,9 @@ public:
             });
         }
     }
+
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
 
     template<typename T>
     void EnQueue(T&& f) {

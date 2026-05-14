@@ -85,6 +85,29 @@ void UkvServer::Run() {
         return;
     }
 
+    if (std::error_code ec; !utils::PathExistOrCreate(kAofBasePath, ec)) {
+        LOG_WARN(ec.message());
+        LOG_WARN("Failed to open AOF directory, persistence disabled");
+    }
+
+    ReplayAof();
+
+    aof_file_.open(kAofFilePath, std::ios::app | std::ios::binary);
+    if (!aof_file_.is_open()) {
+        LOG_WARN("Failed to open AOF file, persistence disabled");
+    }
+
+    std::thread aof_flusher([this] {
+        while (g_running) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::lock_guard<std::mutex> lock(aof_mutex_);
+            if (aof_file_.is_open()) {
+                aof_file_.flush();
+            }
+        }
+    });
+    aof_flusher.detach();
+
     while (g_running) {
         int ready_count = epoll_wait(epoll_fd_, active_events_.data(),
                                      active_events_.size(), -1);
@@ -117,7 +140,7 @@ bool UkvServer::InitNetwork() {
     // Disable 'IPv6-only' to support dual-stack socket.
     int opt = 0;
     if (setsockopt(listen_fd_, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) == -1) {
-        LOG_ERROR("Failed to enablr dual-stack socket");
+        LOG_ERROR("Failed to enable dual-stack socket");
     }
 
     // Enable port reuse to avoid 'address already in use' errors during server restarts.
@@ -140,7 +163,7 @@ bool UkvServer::InitNetwork() {
     }
 
     epoll_fd_ = epoll_create1(0);
-    epoll_event event;
+    epoll_event event{};
     event.events = EPOLLIN;
     event.data.fd = listen_fd_;
     epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, listen_fd_, &event);
@@ -149,7 +172,7 @@ bool UkvServer::InitNetwork() {
 }
 
 void UkvServer::HandleNewConnection() {
-    epoll_event event;
+    epoll_event event{};
     sockaddr_in6 client_addr{};
     socklen_t client_addr_len = sizeof(client_addr);
     int client_fd = accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len);
@@ -216,7 +239,7 @@ void UkvServer::HandleClientData(int active_fd) {
                 }
             }
 
-            epoll_event re_event;
+            epoll_event re_event{};
             re_event.events = EPOLLIN | EPOLLONESHOT;
             re_event.data.fd = active_fd;
             epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, active_fd, &re_event);
@@ -251,6 +274,8 @@ void UkvServer::DoSet(std::vector<std::string>&& args, std::string& out_buffer) 
         return;
     }
 
+    AppendAof(args);
+
     std::string& key = args[1];
     std::string& value = args[2];
 
@@ -266,6 +291,8 @@ void UkvServer::DoDelete(std::vector<std::string>&& args, std::string& out_buffe
         return;
     }
 
+    AppendAof(args);
+
     for (size_t i = 1; i < args.size(); i++) {
         std::string& key = args[i];
         success_delete_count += cache_->Delete(key);
@@ -276,4 +303,48 @@ void UkvServer::DoDelete(std::vector<std::string>&& args, std::string& out_buffe
 
 void UkvServer::DoConfig(std::vector<std::string>&& args, std::string& out_buffer) {
     out_buffer.append("*0\r\n");
+}
+
+void UkvServer::AppendAof(const std::vector<std::string>& args) {
+    if (!aof_file_.is_open()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(aof_mutex_);
+
+    std::string line;
+    RespBuilder::BulkStringArray(args, line);
+    aof_file_.write(line.data(), line.size());
+}
+
+void UkvServer::ReplayAof() {
+    std::ifstream file(kAofFilePath, std::ios::binary);
+    if (!file.is_open()) {
+        return;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(file)),
+                         std::istreambuf_iterator<char>());
+    if (content.empty()) return;
+
+    RespParser parser;
+    parser.AppendData(content.data(), content.size());
+
+    std::optional<std::vector<std::string>> opt_command;
+    std::string dummy_out;
+    while ((opt_command = parser.NextCommand()) != std::nullopt) {
+        auto command = std::move(opt_command.value());
+        if (command.empty()) continue;
+
+        std::string& action = command[0];
+        std::transform(action.begin(), action.end(), action.begin(), ::toupper);
+
+        auto iter = command_handlers_.find(action);
+        if (iter != command_handlers_.end()) {
+            iter->second(std::move(command), dummy_out);
+            dummy_out.clear();
+        }
+    }
+
+    LOG_INFO("AOF Replay complete");
 }

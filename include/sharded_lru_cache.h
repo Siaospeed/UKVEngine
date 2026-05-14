@@ -10,6 +10,10 @@
 class ShardedLruCache {
 public:
     explicit ShardedLruCache(size_t capacity, size_t num_shards = 16);
+
+    ShardedLruCache(const ShardedLruCache&) = delete;
+    ShardedLruCache& operator=(const ShardedLruCache&) = delete;
+
     bool Get(const std::string& key, std::string* value);
     void Put(std::string key, std::string value);
     bool Delete(const std::string& key);

@@ -60,7 +60,7 @@ UKVEngine 分为两个部分：
 
 ## 🌐 Roadmap
 
-- [ ] **AOF 持久化**：支持 Append-Only File，实现重启后数据恢复
+- [x] **AOF 持久化**：支持 Append-Only File，实现重启后数据恢复
 - [ ] **TTL 与键过期**：实现 `EXPIRE` / `TTL`，支持惰性删除与后台定期清理
 - [ ] **更完整的命令支持**：`EXISTS`、`INCR` / `DECR`、`KEYS` 等
 - [ ] **Multi-Reactor 模型**：将当前 Reactor + 线程池架构改造为多线程独立 event loop，进一步降低高并发延迟

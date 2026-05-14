@@ -23,6 +23,7 @@
     } while(0)
 
 #include <charconv>
+#include <filesystem>
 
 namespace utils {
 template<typename T>
@@ -33,6 +34,15 @@ static void FastIntToString(T value, std::string& out) {
         out.append(buf, ptr - buf);
     }
 }
+
+inline bool PathExistOrCreate(const std::filesystem::path& path, std::error_code& ec) {
+    if (!std::filesystem::exists(path)) {
+        if (!std::filesystem::create_directories(path, ec)) {
+            return false;
+        }
+    }
+    return true;
 }
+} // namespace utils
 
 #endif // !UKVENGINE_UTILS_H_

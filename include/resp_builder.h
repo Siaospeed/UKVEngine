@@ -42,9 +42,6 @@ public:
             out.append("\r\n").append(arg).append("\r\n");
         }
     }
-
-private:
-
 };
 
 #endif // !UKVENGINE_RESP_BUILDER_H_

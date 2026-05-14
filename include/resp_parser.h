@@ -11,7 +11,7 @@ public:
     RespParser() = default;
 
     void AppendData(const char* data, size_t len);
-    std::optional<std::vector<std::string> > NextCommand();
+    std::optional<std::vector<std::string>> NextCommand();
 
 private:
     enum class ParseState {
