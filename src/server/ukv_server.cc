@@ -52,6 +52,12 @@ UkvServer::~UkvServer() {
     if (epoll_fd_ != -1) {
         close(epoll_fd_);
     }
+
+    aof_flusher_.join();
+
+    if (aof_file_.is_open()) {
+        aof_file_.close();
+    }
 }
 
 int UkvServer::ParseArgs(int argc, char* argv[]) {
@@ -97,16 +103,31 @@ void UkvServer::Run() {
         LOG_WARN("Failed to open AOF file, persistence disabled");
     }
 
-    std::thread aof_flusher([this] {
+    aof_flusher_ = std::thread([this] {
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            std::lock_guard<std::mutex> lock(aof_mutex_);
+
+            {
+                std::lock_guard<std::mutex> lock(aof_buffer_mutex_);
+                if (active_aof_buffer_.empty()) { continue; }
+                std::swap(active_aof_buffer_, backend_aof_buffer_);
+            }
+
             if (aof_file_.is_open()) {
+                aof_file_.write(backend_aof_buffer_.data(), backend_aof_buffer_.size());
                 aof_file_.flush();
             }
+
+            backend_aof_buffer_.clear();
+        }
+
+        std::lock_guard<std::mutex> lock(aof_buffer_mutex_);
+        if (aof_file_.is_open() && !active_aof_buffer_.empty()) {
+            aof_file_.write(active_aof_buffer_.data(), active_aof_buffer_.size());
+            aof_file_.flush();
+            active_aof_buffer_.clear();
         }
     });
-    aof_flusher.detach();
 
     while (g_running) {
         int ready_count = epoll_wait(epoll_fd_, active_events_.data(),
@@ -310,11 +331,11 @@ void UkvServer::AppendAof(const std::vector<std::string>& args) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(aof_mutex_);
-
     std::string line;
     RespBuilder::BulkStringArray(args, line);
-    aof_file_.write(line.data(), line.size());
+
+    std::lock_guard<std::mutex> lock(aof_buffer_mutex_);
+    active_aof_buffer_.append(line);
 }
 
 void UkvServer::ReplayAof() {

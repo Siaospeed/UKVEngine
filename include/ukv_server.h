@@ -53,10 +53,13 @@ private:
 
     inline static const std::filesystem::path kAofBasePath = "/var/lib/ukvd";
     inline static const std::filesystem::path kAofFilePath = kAofBasePath / "ukv.aof";
+    std::string active_aof_buffer_;
+    std::string backend_aof_buffer_;
+    std::thread aof_flusher_;
     std::ofstream aof_file_;
 
     std::shared_mutex map_mutex_;
-    std::mutex aof_mutex_;
+    std::mutex aof_buffer_mutex_;
 
     enum class ServerState {
         OK,
