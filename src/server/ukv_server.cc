@@ -196,19 +196,16 @@ void UkvServer::HandleNewConnection() {
     epoll_event event{};
     sockaddr_in6 client_addr{};
     socklen_t client_addr_len = sizeof(client_addr);
-    int client_fd = accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len);
+    int client_fd = accept4(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len, SOCK_NONBLOCK);
     if (client_fd == -1) {
         return;
     }
-
-    int flags = fcntl(client_fd, F_GETFL, 0);
-    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
 
     int flag = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
     {
-        std::lock_guard<std::shared_mutex> lock(map_mutex_);
+        std::unique_lock<std::shared_mutex> lock(map_mutex_);
         client_parsers_[client_fd] = {};
     }
 
@@ -225,7 +222,7 @@ void UkvServer::HandleClientData(int active_fd) {
         if (bytes_read > 0) {
             RespParser* parser = nullptr;
             {
-                std::lock_guard<std::shared_mutex> lock(map_mutex_);
+                std::shared_lock<std::shared_mutex> lock(map_mutex_);
                 auto iter = client_parsers_.find(active_fd);
                 if (iter != client_parsers_.end()) {
                     parser = &(iter->second);
@@ -267,7 +264,7 @@ void UkvServer::HandleClientData(int active_fd) {
         }
         else if (bytes_read == 0) {
             close(active_fd);
-            std::lock_guard<std::shared_mutex> lock(map_mutex_);
+            std::unique_lock<std::shared_mutex> lock(map_mutex_);
             client_parsers_.erase(active_fd);
         }
     });
