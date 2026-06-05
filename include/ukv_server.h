@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "context.h"
 #include "sharded_lru_cache.h"
 #include "resp_parser.h"
 #include "thread_pool.h"
@@ -45,11 +46,13 @@ private:
 
     int listen_fd_ = -1;
     int epoll_fd_ = -1;
+    EpollContext listen_context_{EpollContextType::LISTENER, -1};
+
     sockaddr_in6 server_addr_{};
 
     std::vector<epoll_event> active_events_;
     std::unique_ptr<ThreadPool> pool_;
-    std::unordered_map<int, RespParser> client_parsers_;
+    std::unordered_map<int, std::unique_ptr<ClientContext>> clients_;
 
     inline static const std::filesystem::path kAofBasePath = "/var/lib/ukvd";
     inline static const std::filesystem::path kAofFilePath = kAofBasePath / "ukv.aof";
@@ -58,7 +61,7 @@ private:
     std::thread aof_flusher_;
     std::ofstream aof_file_;
 
-    std::shared_mutex map_mutex_;
+    std::shared_mutex clients_mutex_;
     std::mutex aof_buffer_mutex_;
 
     enum class ServerState {
@@ -68,7 +71,13 @@ private:
 
     bool InitNetwork();
     void HandleNewConnection();
-    void HandleClientData(int active_fd);
+    void HandleClientEvent(ClientContext* client_context, uint32_t events);
+
+    bool ReadAll(ClientContext* client_context);
+    void ProcessCommands(ClientContext* client_context);
+    bool FlushOutput(ClientContext* client_context);
+    void RearmClient(ClientContext* client_context);
+    void CloseClient(ClientContext* client_context);
 
     void AppendAof(const std::vector<std::string>& args);
     void ReplayAof();

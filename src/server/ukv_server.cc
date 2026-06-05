@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstring>
 #include <iostream>
 #include <thread>
 
@@ -40,10 +41,11 @@ UkvServer::UkvServer(ShardedLruCache* cache)
 }
 
 UkvServer::~UkvServer() {
-    for (const auto& [client_fd, x] : client_parsers_) {
+    for (const auto& [client_fd, x] : clients_) {
         close(client_fd);
     }
-    client_parsers_.clear();
+
+    clients_.clear();
 
     if (listen_fd_ != -1) {
         close(listen_fd_);
@@ -141,12 +143,14 @@ void UkvServer::Run() {
         }
 
         for (int i = 0; i < ready_count; i++) {
-            int active_fd = active_events_[i].data.fd;
-            if (active_fd == listen_fd_) {
+            auto* base = static_cast<EpollContext*>(active_events_[i].data.ptr);
+
+            if (base->type == EpollContextType::LISTENER) {
                 HandleNewConnection();
             }
             else {
-                HandleClientData(active_fd);
+                auto* context = static_cast<ClientContext*>(base);
+                HandleClientEvent(context, active_events_[i].events);
             }
         }
     }
@@ -154,9 +158,14 @@ void UkvServer::Run() {
 
 bool UkvServer::InitNetwork() {
     listen_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
+    listen_context_.fd = listen_fd_;
+
     if (listen_fd_ == -1) {
         LOG_FATAL("Cannot create socket!");
     }
+
+    int listen_fd_flag = fcntl(listen_fd_, F_GETFL, 0);
+    fcntl(listen_fd_, F_SETFL, listen_fd_flag | O_NONBLOCK);
 
     // Disable 'IPv6-only' to support dual-stack socket.
     int opt = 0;
@@ -185,89 +194,241 @@ bool UkvServer::InitNetwork() {
 
     epoll_fd_ = epoll_create1(0);
     epoll_event event{};
-    event.events = EPOLLIN;
-    event.data.fd = listen_fd_;
+    event.events = EPOLLIN | EPOLLET;
+    event.data.ptr = &listen_context_;
     epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, listen_fd_, &event);
 
     return true;
 }
 
 void UkvServer::HandleNewConnection() {
-    epoll_event event{};
-    sockaddr_in6 client_addr{};
-    socklen_t client_addr_len = sizeof(client_addr);
-    int client_fd = accept4(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len, SOCK_NONBLOCK);
-    if (client_fd == -1) {
+    for (;;) {
+        sockaddr_in6 client_addr{};
+        socklen_t client_addr_len = sizeof(client_addr);
+
+        int client_fd = accept4(
+            listen_fd_,
+            reinterpret_cast<sockaddr*>(&client_addr),
+            &client_addr_len,
+            SOCK_NONBLOCK | SOCK_CLOEXEC
+        );
+
+        if (client_fd >= 0) {
+            int flag = 1;
+            if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag))) {
+                LOG_ERROR("Failed to set TCP_NODELAY");
+            }
+
+            auto owned_client_context = std::make_unique<ClientContext>(client_fd);
+            auto* client_context = owned_client_context.get();
+
+            {
+                std::unique_lock<std::shared_mutex> lock(clients_mutex_);
+                clients_.emplace(client_fd, std::move(owned_client_context));
+            }
+
+            epoll_event event{};
+            event.events = EPOLLIN | EPOLLRDHUP | EPOLLET | EPOLLONESHOT;
+            event.data.ptr = client_context;
+
+            if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &event) < 0) {
+                int saved_errno = errno;
+
+                {
+                    std::unique_lock<std::shared_mutex> lock(clients_mutex_);
+                    clients_.erase(client_fd);
+                }
+
+                close(client_fd);
+
+                std::string error_msg;
+                error_msg.append("epoll_ctl ADD failed: ")
+                         .append(std::to_string(saved_errno))
+                         .append(": ")
+                         .append(std::strerror(saved_errno));
+                LOG_ERROR(error_msg);
+            }
+
+            continue;
+        }
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        if (errno == ECONNABORTED) {
+            LOG_ERROR("accept4 failed: ECONNABORTED");
+            continue;
+        }
+
+        std::string error_msg;
+        error_msg.append("accept4 failed: ")
+                 .append(std::to_string(errno))
+                 .append(": ")
+                 .append(std::strerror(errno));
+        LOG_ERROR(error_msg);
+
+        break;
+    }
+}
+
+void UkvServer::HandleClientEvent(ClientContext* client_context, uint32_t events) {
+    pool_->EnQueue([this, client_context, events] {
+        if (client_context == nullptr || client_context->is_closed.load()) {
+            return;
+        }
+
+        if (events & (EPOLLERR | EPOLLHUP)) {
+            CloseClient(client_context);
+            return;
+        }
+
+        if (events & (EPOLLIN | EPOLLRDHUP)) {
+            if (!ReadAll(client_context)) {
+                return;
+            }
+
+            ProcessCommands(client_context);
+        }
+
+        if ((events & EPOLLOUT) || client_context->write_pos < client_context->out_buffer.size()) {
+            if (!FlushOutput(client_context)) {
+                return;
+            }
+        }
+
+        RearmClient(client_context);
+    });
+}
+
+bool UkvServer::ReadAll(ClientContext* client_context) {
+    char buffer[16384] = {};
+
+    for (;;) {
+        ssize_t bytes_read = read(client_context->fd, buffer, sizeof(buffer));
+
+        if (bytes_read > 0) {
+            client_context->parser.AppendData(buffer, bytes_read);
+            continue;
+        }
+
+        if (bytes_read == 0) {
+            CloseClient(client_context);
+            return false;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return true;
+        }
+
+        LOG_ERROR(std::string("Failed to read: ") +
+                  std::to_string(errno) + ": " +
+                  std::strerror(errno));
+        CloseClient(client_context);
+        return false;
+    }
+}
+
+void UkvServer::ProcessCommands(ClientContext* client_context) {
+    std::optional<std::vector<std::string>> opt_command;
+
+    while ((opt_command = client_context->parser.NextCommand()) != std::nullopt) {
+        auto command = std::move(opt_command.value());
+        if (command.empty()) {
+            continue;
+        }
+
+        std::string& action = command[0];
+        std::transform(action.begin(), action.end(), action.begin(), ::toupper);
+
+        auto iter = command_handlers_.find(action);
+        if (iter != command_handlers_.end()) {
+            iter->second(std::move(command), client_context->out_buffer);
+        }
+        else {
+            RespBuilder::Error("unknown action", client_context->out_buffer);
+        }
+    }
+}
+
+bool UkvServer::FlushOutput(ClientContext* client_context) {
+    while (client_context->write_pos < client_context->out_buffer.size()) {
+        const char* data = client_context->out_buffer.data() + client_context->write_pos;
+        size_t left_size = client_context->out_buffer.size() - client_context->write_pos;
+
+        ssize_t bytes_write = write(client_context->fd, data, left_size);
+
+        if (bytes_write > 0) {
+            client_context->write_pos += bytes_write;
+            continue;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return true;
+        }
+
+        LOG_ERROR(std::string("Failed to write: ") +
+                  std::to_string(errno) + ": " +
+                  std::strerror(errno));
+        CloseClient(client_context);
+        return false;
+    }
+
+    client_context->out_buffer.clear();
+    client_context->write_pos = 0;
+    return true;
+}
+void UkvServer::RearmClient(ClientContext* client_context) {
+    if (client_context == nullptr || client_context->is_closed.load()) {
         return;
     }
 
-    int flag = 1;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    epoll_event re_event{};
+    re_event.events = EPOLLIN | EPOLLRDHUP | EPOLLET | EPOLLONESHOT;
 
-    {
-        std::unique_lock<std::shared_mutex> lock(map_mutex_);
-        client_parsers_[client_fd] = {};
+    if (client_context->write_pos < client_context->out_buffer.size()) {
+        re_event.events |= EPOLLOUT;
     }
 
-    event.events = EPOLLIN | EPOLLONESHOT;
-    event.data.fd = client_fd;
-    epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &event);
+    re_event.data.ptr = client_context;
+
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, client_context->fd, &re_event) < 0) {
+        LOG_ERROR(std::string("epoll_ctl MOD failed: ") +
+                  std::to_string(errno) + ": " +
+                  std::strerror(errno));
+        CloseClient(client_context);
+    }
 }
 
-void UkvServer::HandleClientData(int active_fd) {
-    pool_->EnQueue([active_fd, this] {
-        char buffer[16384] = {};
+void UkvServer::CloseClient(ClientContext* client_context) {
+    if (client_context == nullptr) {
+        return;
+    }
 
-        ssize_t bytes_read = read(active_fd, buffer, sizeof(buffer) - 1);
-        if (bytes_read > 0) {
-            RespParser* parser = nullptr;
-            {
-                std::shared_lock<std::shared_mutex> lock(map_mutex_);
-                auto iter = client_parsers_.find(active_fd);
-                if (iter != client_parsers_.end()) {
-                    parser = &(iter->second);
-                }
-            }
+    if (client_context->is_closed.exchange(true)) {
+        return;
+    }
 
-            if (parser != nullptr) {
-                parser->AppendData(buffer, bytes_read);
-                std::optional<std::vector<std::string>> opt_command;
-                thread_local std::string out_buffer;
-                out_buffer.reserve(8192);
-                out_buffer.clear();
-                while ((opt_command = parser->NextCommand()) != std::nullopt) {
-                    auto command = std::move(opt_command.value());
-                    if (command.empty()) {
-                        continue;
-                    }
+    int fd = client_context->fd;
+    epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+    close(fd);
 
-                    std::string& action = command[0];
-                    std::transform(action.begin(), action.end(), action.begin(), ::toupper);
-
-                    auto iter = command_handlers_.find(action);
-                    if (iter != command_handlers_.end()) {
-                        iter->second(std::move(command), out_buffer);
-                    }
-                    else {
-                        RespBuilder::Error("unknown action", out_buffer);
-                    }
-                }
-                if (!out_buffer.empty()) {
-                    write(active_fd, out_buffer.data(), out_buffer.size());
-                }
-            }
-
-            epoll_event re_event{};
-            re_event.events = EPOLLIN | EPOLLONESHOT;
-            re_event.data.fd = active_fd;
-            epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, active_fd, &re_event);
-        }
-        else if (bytes_read == 0) {
-            close(active_fd);
-            std::unique_lock<std::shared_mutex> lock(map_mutex_);
-            client_parsers_.erase(active_fd);
-        }
-    });
+    {
+        std::unique_lock<std::shared_mutex> lock(clients_mutex_);
+        clients_.erase(fd);
+    }
 }
 
 void UkvServer::DoGet(std::vector<std::string>&& args, std::string& out_buffer) {
