@@ -8,7 +8,6 @@ void RespParser::AppendData(const char* data, size_t len) {
 
 std::optional<std::vector<std::string>> RespParser::NextCommand() {
     std::string_view sv = internal_buffer_;
-    t_.clear();
 
     while (parse_index_ < sv.size()) {
         char c = sv[parse_index_];
@@ -18,6 +17,7 @@ std::optional<std::vector<std::string>> RespParser::NextCommand() {
                 if (c != '*') {
                     return ErrorDataHandler();
                 }
+                t_.clear();
                 parse_state_ = ParseState::READ_ARRAY_LEN;
                 break;
 
@@ -52,6 +52,7 @@ std::optional<std::vector<std::string>> RespParser::NextCommand() {
                 if (c != '$') {
                     return ErrorDataHandler();
                 }
+                t_.clear();
                 parse_state_ = ParseState::READ_STR_LEN;
                 break;
 
